@@ -8,23 +8,32 @@ import type {
 
 function resolveBaseUrl(): string {
   const explicit = import.meta.env.VITE_MCP_BASE_URL;
-  if (explicit && typeof explicit === "string") {
-    return explicit.replace(/\/$/, "");
+  if (typeof explicit === "string") {
+    const trimmed = explicit.trim();
+    if (trimmed.length > 0) {
+      return trimmed.replace(/\/$/, "");
+    }
+  }
+  if (import.meta.env.PROD && typeof window !== "undefined") {
+    return window.location.origin.replace(/\/$/, "");
   }
   if (import.meta.env.DEV) {
-    return "http://localhost:8080";
-  }
-  if (typeof window !== "undefined") {
-    return window.location.origin.replace(/\/$/, "");
+    console.warn("VITE_MCP_BASE_URL belum dikonfigurasi di berkas .env");
   }
   return "";
 }
 
 const BASE_URL = resolveBaseUrl();
 
+function createRequestUrl(path: string): string {
+  if (!BASE_URL) {
+    throw new Error("Konfigurasi API tidak ditemukan. Set VITE_MCP_BASE_URL pada file .env Anda.");
+  }
+  return `${BASE_URL}${path}`;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const url = `${BASE_URL}${path}`;
-  const response = await fetch(url, {
+  const response = await fetch(createRequestUrl(path), {
     headers: {
       "Content-Type": "application/json",
       ...(options?.headers ?? {}),

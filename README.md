@@ -29,6 +29,16 @@ You can use one of them `npm`, `yarn`, `pnpm`, `bun`, Example using `npm`:
 npm install
 ```
 
+### Configure environment variables
+
+Update the `.env.development` (and `.env.production` if needed) file with the base URL of your MCP API:
+
+```bash
+VITE_MCP_BASE_URL=http://localhost:8080
+```
+
+The application reads this value through `import.meta.env`, so restart the dev server after making changes.
+
 ### Run the development server
 
 ```bash
