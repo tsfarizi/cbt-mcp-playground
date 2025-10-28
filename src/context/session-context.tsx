@@ -73,7 +73,14 @@ function loadFromStorage(): SessionState {
       };
       normalisedMap[id] = {
         ...session,
-        messages: Array.isArray(session.messages) ? session.messages : [],
+        messages: Array.isArray(session.messages)
+          ? session.messages.map((message) => ({
+              ...message,
+              attachments: Array.isArray(message.attachments)
+                ? message.attachments
+                : undefined,
+            }))
+          : [],
         tools: Array.isArray(session.tools) ? session.tools : [],
         logs: Array.isArray(session.logs) ? session.logs ?? [] : [],
       };

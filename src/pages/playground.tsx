@@ -1,17 +1,24 @@
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from "react";
+﻿import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from "react";
+import type { AnchorHTMLAttributes, HTMLAttributes, ReactNode } from "react";
 
 import { Button } from "@heroui/button";
 import { Input } from "@heroui/input";
 
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import type { Components } from "react-markdown";
+
 import { useSessions } from "@/context/session-context";
 import { fetchTools, loadConfig, sendChat, toToolLogs } from "@/lib/api";
 import type {
+  AgentToolStep,
   ProviderDefinition,
   Session,
   SessionMessage,
   SessionToolLog,
   SessionLogEntry,
   ToolDefinition,
+  MessageAttachment,
 } from "@/types";
 
 function formatTimestamp(value: string) {
@@ -23,6 +30,56 @@ function formatTimestamp(value: string) {
 }
 
 const DEFAULT_MAX_STEPS = 8;
+
+const markdownClassName =
+  "markdown-body mt-1 text-sm leading-relaxed [&>*:first-child]:mt-0 [&>*+*]:mt-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:pl-0 [&_blockquote]:border-l-4 [&_blockquote]:border-slate-200 [&_blockquote]:pl-3 [&_blockquote]:text-sm [&_hr]:my-4 [&_a]:font-medium [&_a]:underline [&_a]:text-primary [&_a:hover]:text-primary/80 [&_code]:rounded [&_code]:bg-black/10 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[13px] [&_pre]:mt-3 [&_pre]:overflow-x-auto [&_pre]:rounded-xl [&_pre]:bg-slate-900 [&_pre]:px-3 [&_pre]:py-2 [&_pre]:text-xs [&_pre_code]:text-slate-100";
+
+type MarkdownCodeProps = HTMLAttributes<HTMLElement> & {
+  inline?: boolean;
+  className?: string;
+  children?: ReactNode;
+};
+
+const MarkdownCode = ({ inline, className, children, ...props }: MarkdownCodeProps) => {
+  if (inline) {
+    return (
+      <code
+        className={`rounded bg-black/10 px-1 py-0.5 font-mono text-[13px] ${className ?? ""}`}
+        {...props}
+      >
+        {children}
+      </code>
+    );
+  }
+
+  return (
+    <pre className="mt-3 overflow-x-auto rounded-xl bg-slate-900 px-3 py-2 text-xs leading-relaxed">
+      <code className={className ?? ""} {...props}>
+        {children}
+      </code>
+    </pre>
+  );
+};
+
+type MarkdownLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
+  children?: ReactNode;
+};
+
+const MarkdownLink = ({ children, ...props }: MarkdownLinkProps) => (
+  <a
+    {...props}
+    target="_blank"
+    rel="noopener noreferrer"
+    className="font-medium text-primary underline hover:text-primary/80"
+  >
+    {children}
+  </a>
+);
+
+const markdownComponents: Components = {
+  code: MarkdownCode as Components["code"],
+  a: MarkdownLink as Components["a"],
+};
 
 export default function PlaygroundPage() {
   const {
@@ -171,6 +228,198 @@ export default function PlaygroundPage() {
     }));
   };
 
+  const createAttachmentMessagesFromSteps = (
+    sessionId: string,
+    steps: AgentToolStep[],
+  ): SessionMessage[] => {
+    if (!steps?.length) {
+      return [];
+    }
+    const baseTime = Date.now();
+    return steps.flatMap((step, index) => {
+      const attachments = extractAttachments(step);
+      if (!attachments.length) {
+        return [];
+      }
+      const structured = extractStructuredContent(step.output);
+      const summary = buildAttachmentSummary(step, structured);
+      return [
+        {
+          id: `${sessionId}-attachment-${baseTime + index}-${Math.random()
+            .toString(16)
+            .slice(2, 8)}`,
+          role: "system" as const,
+          content: summary,
+          timestamp: new Date(baseTime + index).toISOString(),
+          attachments,
+        },
+      ];
+    });
+  };
+
+  const extractAttachments = (step: AgentToolStep): MessageAttachment[] => {
+    const structured = extractStructuredContent(step.output);
+    if (!structured) {
+      return [];
+    }
+    const attachments: MessageAttachment[] = [];
+    const seen = new Set<string>();
+    const candidates = ["file", "files", "attachments"];
+
+    candidates.forEach((key) => {
+      const value = structured[key];
+      if (!value) {
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((item, idx) => {
+          const attachment = toAttachment(item, step.tool, attachments.length + idx + 1);
+          if (attachment && !seen.has(attachment.data)) {
+            seen.add(attachment.data);
+            attachments.push(attachment);
+          }
+        });
+        return;
+      }
+      const attachment = toAttachment(value, step.tool, attachments.length + 1);
+      if (attachment && !seen.has(attachment.data)) {
+        seen.add(attachment.data);
+        attachments.push(attachment);
+      }
+    });
+
+    return attachments;
+  };
+
+  const extractStructuredContent = (
+    output: unknown,
+  ): Record<string, unknown> | null => {
+    if (!output || typeof output !== "object") {
+      return null;
+    }
+    const record = output as Record<string, unknown>;
+    const candidate =
+      record["structuredContent"] ??
+      record["structured_content"] ??
+      record["data"];
+    if (candidate && typeof candidate === "object") {
+      return candidate as Record<string, unknown>;
+    }
+    return null;
+  };
+
+  const safeString = (value: unknown): string | undefined => {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  };
+
+  const toAttachment = (
+    raw: unknown,
+    tool: string,
+    index: number,
+  ): MessageAttachment | null => {
+    if (!raw || typeof raw !== "object") {
+      return null;
+    }
+    const record = raw as Record<string, unknown>;
+    const base64Raw =
+      record["base64"] ?? record["data"] ?? record["content"] ?? record["value"];
+    const base64 = safeString(base64Raw);
+    if (!base64) {
+      return null;
+    }
+    const cleanedBase64 = base64.replace(/\s+/g, "");
+    const mimeType =
+      safeString(
+        record["mimeType"] ?? record["mimetype"] ?? record["type"],
+      ) ??
+      "application/octet-stream";
+
+    const fallbackExtension =
+      mimeType === "application/pdf"
+        ? ".pdf"
+        : mimeType === "image/png"
+          ? ".png"
+          : mimeType === "image/jpeg"
+            ? ".jpg"
+            : "";
+    const fallbackName = `${tool}-attachment-${index}${fallbackExtension}`;
+    const filename =
+      safeString(record["filename"] ?? record["name"] ?? record["title"]) ??
+      fallbackName;
+
+    return {
+      id: `${tool}-attachment-${Date.now()}-${Math.random()
+        .toString(16)
+        .slice(2, 8)}`,
+      filename,
+      mimeType,
+      data: cleanedBase64,
+    };
+  };
+
+  const buildAttachmentSummary = (
+    step: AgentToolStep,
+    structured: Record<string, unknown> | null,
+  ): string => {
+    const parts: string[] = [];
+    const messageText = safeString(step.message);
+    if (messageText) {
+      parts.push(messageText);
+    }
+    const textFromContent = extractTextFromOutput(step.output);
+    if (textFromContent) {
+      parts.push(textFromContent);
+    }
+    if (structured) {
+      const nomor = safeString(structured["nomor"] ?? structured["number"]);
+      const tanggal = safeString(structured["tanggal"] ?? structured["date"]);
+      if (nomor || tanggal) {
+        const details = [
+          nomor ? `Nomor: ${nomor}` : null,
+          tanggal ? `Tanggal: ${tanggal}` : null,
+        ]
+          .filter(Boolean)
+          .join(" - ");
+        if (details) {
+          parts.push(details);
+        }
+      }
+    }
+    if (!parts.length) {
+      parts.push(`Tool ${step.tool} menghasilkan lampiran.`);
+    }
+    return Array.from(new Set(parts.map((item) => item.trim()).filter(Boolean))).join(
+      "\n",
+    );
+  };
+
+  const extractTextFromOutput = (output: unknown): string | undefined => {
+    if (!output || typeof output !== "object") {
+      return undefined;
+    }
+    const record = output as Record<string, unknown>;
+    const content = record["content"];
+    if (Array.isArray(content)) {
+      const texts = content
+        .map((item) => {
+          if (!item || typeof item !== "object") {
+            return undefined;
+          }
+          const value = (item as Record<string, unknown>)["text"];
+          return safeString(value);
+        })
+        .filter((text): text is string => typeof text === "string" && text.length > 0);
+      if (texts.length) {
+        return texts.join("\n");
+      }
+    }
+    return safeString(record["text"] ?? record["message"]);
+  };
+
   const ensureSession = () => {
     if (currentSessionId) {
       return currentSessionId;
@@ -192,7 +441,7 @@ export default function PlaygroundPage() {
 
     const sessionId = ensureSession();
     setStatus(
-      `Mengirim permintaan (${selectedProvider} · ${selectedModel})...`,
+      `Mengirim permintaan (${selectedProvider} - ${selectedModel})...`,
     );
     setIsSending(true);
 
@@ -201,6 +450,7 @@ export default function PlaygroundPage() {
       role: "user",
       content: prompt.trim(),
       timestamp: new Date().toISOString(),
+      attachments: [],
     };
     appendMessage(sessionId, userMessage);
 
@@ -214,14 +464,23 @@ export default function PlaygroundPage() {
         model: selectedModel,
       });
 
+        const toolSteps = response.tool_steps ?? [];
         const assistantMessage: SessionMessage = {
           id: `${response.session_id}-assistant-${Date.now()}`,
           role: "assistant",
           content: response.content ?? "",
           timestamp: new Date().toISOString(),
+          attachments: [],
         };
         appendMessage(response.session_id, assistantMessage);
-        appendToolLogs(response.session_id, toToolLogs(response.tool_steps ?? []));
+        appendToolLogs(response.session_id, toToolLogs(toolSteps));
+        const attachmentMessages = createAttachmentMessagesFromSteps(
+          response.session_id,
+          toolSteps,
+        );
+        attachmentMessages.forEach((message) =>
+          appendMessage(response.session_id, message),
+        );
         if (response.logs && response.logs.length > 0) {
           appendLogs(
             response.session_id,
@@ -237,7 +496,7 @@ export default function PlaygroundPage() {
       }
       const resolvedProvider = response.provider ?? selectedProvider;
       const resolvedModel = response.model ?? selectedModel;
-      setStatus(`Jawaban diterima (${resolvedProvider} · ${resolvedModel}).`);
+      setStatus(`Jawaban diterima (${resolvedProvider} - ${resolvedModel}).`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const systemMessage: SessionMessage = {
@@ -245,6 +504,7 @@ export default function PlaygroundPage() {
         role: "system",
         content: `Gagal mengirim prompt: ${message}`,
         timestamp: new Date().toISOString(),
+        attachments: [],
       };
       appendMessage(sessionId, systemMessage);
       setStatus(message);
@@ -393,9 +653,28 @@ export default function PlaygroundPage() {
                       {formatTimestamp(message.timestamp)}
                     </span>
                   </div>
-                  <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-800">
-                    {message.content}
-                  </p>
+                  <div className={markdownClassName}>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={markdownComponents}
+                    >
+                      {message.content}
+                    </ReactMarkdown>
+                  </div>
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {message.attachments.map((attachment) => (
+                        <a
+                          key={attachment.id}
+                          href={`data:${attachment.mimeType};base64,${attachment.data}`}
+                          download={attachment.filename}
+                          className="inline-flex items-center gap-2 rounded-xl border border-primary/40 bg-white px-3 py-2 text-xs font-semibold text-primary shadow-sm transition hover:bg-primary/10 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                        >
+                          Unduh {attachment.filename}
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </article>
               ))
             ) : (
@@ -579,5 +858,8 @@ export default function PlaygroundPage() {
     </div>
   );
 }
+
+
+
 
 

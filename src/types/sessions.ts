@@ -5,6 +5,7 @@ export type SessionMessage = {
   role: MessageRole;
   content: string;
   timestamp: string;
+  attachments?: MessageAttachment[];
 };
 
 export type SessionToolLog = {
@@ -31,6 +32,13 @@ export type Session = {
   messages: SessionMessage[];
   tools: SessionToolLog[];
   logs: SessionLogEntry[];
+};
+
+export type MessageAttachment = {
+  id: string;
+  filename: string;
+  mimeType: string;
+  data: string;
 };
 
 
